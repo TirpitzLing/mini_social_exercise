@@ -7,6 +7,13 @@ import sqlite3
 import hashlib
 import re
 from datetime import datetime
+import pandas as pd
+import numpy as np
+import nltk
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 app = Flask(__name__)
 app.secret_key = '123456789' 
@@ -879,7 +886,10 @@ def recommend(user_id, filter_following):
     Returns:
         A list of 5 recommended posts, in reverse-chronological order.
 
-    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. Here are some users that often post DIY comment and a few example posts. Make sure your account did not engage with anything else. You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
+    To test whether your recommendation algorithm works, let's pretend we like the DIY topic. 
+    Here are some users that often post DIY comment and a few example posts. 
+    Make sure your account did not engage with anything else. 
+    You should test your algorithm with these and see if your recommendation algorithm picks up on your interest in DIY and starts showing related content.
     
     Users: @starboy99, @DancingDolphin, @blogger_bob
     Posts: 1810, 1875, 1880, 2113
@@ -890,9 +900,87 @@ def recommend(user_id, filter_following):
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
 
-    recommended_posts = {} 
+    recommended_posts = {}
+    interested_posts = []
+    # find posts the user has reacted
+    user_reactions = query_db('SELECT user_id, post_id, reaction_type FROM reactions WHERE user_id = ?', (user_id,))
+    # consider only positive reactions
+    for reaction in user_reactions:
+        if reaction['reaction_type'] in ['like', 'love', 'haha', 'wow']:
+            interested_posts.append(reaction['post_id'])
+
+    # If no interested posts, return 5 most recent posts
+    if not len(interested_posts):
+        recommended_posts = query_db('''
+            SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+            FROM posts p JOIN users u ON p.user_id = u.id
+            WHERE p.user_id != ? ORDER BY p.created_at DESC LIMIT 5
+        ''', (user_id,))
+        return recommended_posts
+
+    stop_words = set(stopwords.words("english"))
+    # simple preprocessing function
+    def preprocess(text):
+        if not text:
+            return ''
+        text = text.lower()
+        # remove links
+        url = rf"/(https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,})/gi"
+        text = re.sub(url, '', text, flags=re.MULTILINE)
+        # remove punctuation but keep hashtags
+        text = re.sub(r'[^\w\s#]', '', text)
+        # remove stop words
+        return ' '.join([word for word in text.split() if word not in stop_words])
+        
+    all_posts = query_db('SELECT p.id, p.content, p.created_at, u.username, u.id as user_id FROM posts p JOIN users u ON p.user_id = u.id')
+
+    if not len(all_posts):
+        return {}
+    
+    all_posts_df = pd.DataFrame(columns=['post_id', 'user_id', 'content'])
+    interested_posts_df = pd.DataFrame(columns=['post_id', 'user_id', 'content'])
+    for i, post in enumerate(all_posts):
+        if post['id'] in interested_posts:
+            interested_posts_df.loc[len(interested_posts_df)] = [post['id'], post['user_id'], post['content']]
+        else:
+            all_posts_df.loc[len(all_posts_df)] = [post['id'], post['user_id'], post['content']]
+
+    all_posts_df['clean_content'] = all_posts_df['content'].apply(preprocess)
+    interested_posts_df['clean_content'] = interested_posts_df['content'].apply(preprocess)
+
+    tfidf_vectorizer = TfidfVectorizer()
+    tfidf_matrix = tfidf_vectorizer.fit_transform(all_posts_df['clean_content'])
+    interested_vector = tfidf_vectorizer.transform(interested_posts_df['clean_content']).mean(axis=0)
+    interested_vector = np.asarray(interested_vector).ravel()
+    cosine_sim = cosine_similarity([interested_vector], tfidf_matrix).flatten()
+    all_posts_df['similarity'] = cosine_sim
+
+    topSimilarities = all_posts_df.sort_values(by='similarity', ascending=False)
+
+    if filter_following:
+        # Get followed users' posts only
+        followed_users = query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,))
+        followed_user_ids = [u['followed_id'] for u in followed_users]
+        followed_posts = topSimilarities[topSimilarities['user_id'].isin(followed_user_ids)]
+        top5_similar = followed_posts.head(5)
+    else:
+        # Get top 5 similar posts overall
+        top5_similar = topSimilarities.head(5)
+
+    # print(top5_similar[['post_id', 'similarity']])
+    
+    recommended_post_ids = top5_similar['post_id'].tolist()
+
+    query = f'''
+        SELECT p.id, p.content, p.created_at, u.username, u.id as user_id
+        FROM posts p JOIN users u ON p.user_id = u.id
+        WHERE p.id IN ({','.join(['?']*len(recommended_post_ids))})
+        ORDER BY p.created_at DESC
+    '''
+    recommended_posts = query_db(query, recommended_post_ids)
 
     return recommended_posts;
+
 
 # Task 3.2
 def user_risk_analysis(user_id):
@@ -901,17 +989,65 @@ def user_risk_analysis(user_id):
         user_id: The ID of the user on which we perform risk analysis.
 
     Returns:
-        A float number score showing the risk associated with this user. There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
+        A float number score showing the risk associated with this user. 
+        There are no strict rules or bounds to this score, other than that a score of less than 1.0 means no risk, 
+        1.0 to 3.0 is low risk, 3.0 to 5.0 is medium risk and above 5.0 is high risk. 
+        (An upper bound of 5.0 is applied to this score elsewhere in the codebase) 
         
         You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
-    
-    score = 0
 
-    return score;
+    user_risk_score = 0.0
+
+    # profile score
+    user = query_db('SELECT * FROM users WHERE id = ?', (user_id,) , one=True)
+    _, profile_score = moderate_content(user['profile'] if user else '')
+    # score += profile_score
+
+    # posts score
+    postcounter = 0
+    post_score = 0.0
+    user_posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
+    for post in user_posts:
+        postcounter += 1
+        _, post_risk_score = moderate_content(post['content'])
+        post_score += post_risk_score
+    post_score = post_score / postcounter if postcounter > 0 else 0.0
+
+    # comments score
+    commentcounter = 0
+    comment_score = 0.0
+    user_comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    for comment in user_comments:
+        commentcounter += 1
+        _, comment_risk_score = moderate_content(comment['content'])
+        comment_score += comment_risk_score
+    comment_score = comment_score / commentcounter if commentcounter > 0 else 0.0
+
+    content_risk_score = (profile_score * 1) + (post_score * 3) + (comment_score * 1)
+
+    # accountage
+    user_created_dt = user['created_at'] if user else datetime.utcnow()
+    account_age_days = (datetime.utcnow() - user_created_dt).days
+
+    if account_age_days < 7:
+        # user_risk_score = min(5.0, content_risk_score * 1.5)
+        user_risk_score = content_risk_score * 1.5
+    elif account_age_days < 30:
+        # user_risk_score = min(5.0, content_risk_score * 1.2)
+        user_risk_score = content_risk_score * 1.2
+    else:
+        # user_risk_score = min(5.0, content_risk_score)
+        user_risk_score = content_risk_score
+
+    # visual check for high risk users manually
+    if user_risk_score > 5.0:
+        print(f"User: {user_id}, user name: {user['username'] if user else 'Unknown'}, final risk score: {user_risk_score}")
+
+    return user_risk_score;
 
     
 # Task 3.3
@@ -932,9 +1068,81 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
 
+     
     moderated_content = content
-    score = 0
-    
+    score = 0.0
+
+    if not content:
+        return moderated_content, score
+
+    # clear punctuations except ligatures, check case-insensitive words
+    content_lower = content.lower()
+    content_list = re.findall(r'\b[\w%$@#&-]+\b', content_lower)
+
+    # Check for Tier 2 phrases in content
+    tier2mark = False
+    for phrase in TIER2_PHRASES:
+        if phrase in content_lower:
+            tier2mark = True
+            break
+
+    # check for links 
+    url = rf"/(https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|www\.[a-zA-Z0-9][a-zA-Z0-9-]+[a-zA-Z0-9]\.[^\s]{2,}|https?:\/\/(?:www\.|(?!www))[a-zA-Z0-9]+\.[^\s]{2,}|www\.[a-zA-Z0-9]+\.[^\s]{2,})/gi"
+    link_matches = re.findall(url, content, flags=re.IGNORECASE)
+    matches = re.finditer(r'(\S+)\.([^/\s]+)', content) # find '.' and ignore part after '/'
+
+    for link in link_matches:
+        moderated_content = moderated_content.replace(link, "[link removed]")
+        # print(moderated_content)
+        if score < 5.0:
+            score = min(5.0, score + 2.0)
+
+    for m in matches:
+        left = m.group(1)
+        right = m.group(2)
+        # assume if left side of the dot is > 5 and right side < 6, it's probably a link
+        if len(left) > 5 and len(right) < 6 and not right.isnumeric() and not right[0].isupper():
+            idx = moderated_content.find(m.group(0))
+            if idx != -1:
+                nextidx = moderated_content.find(' ', idx)
+                if nextidx == -1:
+                    nextidx = len(moderated_content)
+                moderated_content = moderated_content[:idx] + "[link removed]" + moderated_content[nextidx:]
+            if score < 5.0:
+                score = min(5.0, score + 2.0)
+
+    # check for capitalization
+    chars_in_content = [char for char in list(content) if char.isalpha()]
+    count_upper = sum(1 for c in chars_in_content if c.isupper())
+    if chars_in_content and (count_upper / len(chars_in_content)) > 0.7:
+        if score < 5.0:
+            score = min(5.0, score + 0.5)
+        # print(content)
+
+
+    for word in content_list:
+        
+        if word in TIER1_WORDS:
+            moderated_content = "[content removed due to severe violation]"
+            score = 5.0
+            return moderated_content, score
+
+        elif tier2mark:
+            # print(content)
+            moderated_content = "[content removed due to spam/scam policy]"
+            score = 5.0
+            return moderated_content, score
+
+        elif word in TIER3_WORDS:
+            # content_list[content_list.index(word)] = "*" * len(word)
+            moderated_content = re.sub(r'\b' + re.escape(word) + r'\b', '*' * len(word), moderated_content, flags=re.IGNORECASE)
+            if score < 5.0:
+                score =  min(5.0, score + 2.0)
+            # elif score == 5.0:
+            #     print(content)
+        
+    # moderated_content = str.join(" ", content_list)
+
     return moderated_content, score
 
 
