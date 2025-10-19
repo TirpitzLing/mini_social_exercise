@@ -1053,9 +1053,9 @@ def user_risk_analysis(user_id):
 
     content_risk_score = (profile_score * 1) + (post_score * 3 * pow(1.1, n)) + (comment_score * 1 * pow(1.1, m))
 
-    # accountage
-    user_created_dt = user['created_at'] if user else datetime.utcnow()
-    account_age_days = (datetime.utcnow() - user_created_dt).days
+    # account age
+    user_created_at = user['created_at'] if user else datetime.utcnow()
+    account_age_days = (datetime.utcnow() - user_created_at).days
 
     if account_age_days < 7:
         # user_risk_score = min(5.0, content_risk_score * 1.5)
