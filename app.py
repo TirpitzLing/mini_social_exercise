@@ -1138,7 +1138,7 @@ def moderate_content(content):
     # check for capitalization
     chars = [char for char in list(content) if char.isalpha()]
     count_upper = sum(1 for c in chars if c.isupper())
-    if chars and (count_upper / len(chars)) > 0.7:
+    if chars and len(list(content)) > 15 and (count_upper / len(chars)) > 0.7:
         if score < 5.0:
             score = min(5.0, score + 0.5)
             # print(content)
