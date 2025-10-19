@@ -968,7 +968,7 @@ def recommend(user_id, filter_following):
         top5_similar = topSimilarities.head(5)
 
     # print(top5_similar[['post_id', 'similarity']])
-    
+
     recommended_post_ids = top5_similar['post_id'].tolist()
 
     query = f'''
@@ -1027,7 +1027,31 @@ def user_risk_analysis(user_id):
         comment_score += comment_risk_score
     comment_score = comment_score / commentcounter if commentcounter > 0 else 0.0
 
-    content_risk_score = (profile_score * 1) + (post_score * 3) + (comment_score * 1)
+    # spammer behaviour
+    spammy_posts = query_db('''SELECT u.id, u.username, p.content, COUNT(*)
+        FROM users u
+        JOIN posts p ON u.id = p.user_id
+        WHERE u.id = ?
+        GROUP BY u.id, p.content
+        HAVING COUNT(*) > 2; 
+        ''', (user_id,))
+    n = 0
+    if spammy_posts and len(spammy_posts) > 2:
+        n = len(spammy_posts) - 2
+
+    spammy_comments = query_db('''SELECT u.id, u.username, c.content, COUNT(*)
+        FROM users u
+        JOIN comments c ON u.id = c.user_id
+        WHERE u.id = ?
+        GROUP BY u.id, c.content
+        HAVING COUNT(*) > 2; 
+        ''', (user_id,))
+    m = 0
+    if spammy_comments and len(spammy_comments) > 2:
+        m = len(spammy_comments) - 2
+
+
+    content_risk_score = (profile_score * 1) + (post_score * 3 * pow(1.1, n)) + (comment_score * 1 * pow(1.1, m))
 
     # accountage
     user_created_dt = user['created_at'] if user else datetime.utcnow()
@@ -1100,8 +1124,8 @@ def moderate_content(content):
     for m in matches:
         left = m.group(1)
         right = m.group(2)
-        # assume if left side of the dot is > 5 and right side < 6, it's probably a link
-        if len(left) > 5 and len(right) < 6 and not right.isnumeric() and not right[0].isupper():
+        # assume if left side of the dot is > 3 and right side < 6, it's probably a link
+        if len(left) > 3 and len(right) < 6 and not right.isnumeric() and not right[0].isupper():
             idx = moderated_content.find(m.group(0))
             if idx != -1:
                 nextidx = moderated_content.find(' ', idx)
@@ -1112,12 +1136,21 @@ def moderate_content(content):
                 score = min(5.0, score + 2.0)
 
     # check for capitalization
-    chars_in_content = [char for char in list(content) if char.isalpha()]
-    count_upper = sum(1 for c in chars_in_content if c.isupper())
-    if chars_in_content and (count_upper / len(chars_in_content)) > 0.7:
+    chars = [char for char in list(content) if char.isalpha()]
+    count_upper = sum(1 for c in chars if c.isupper())
+    if chars and (count_upper / len(chars)) > 0.7:
         if score < 5.0:
             score = min(5.0, score + 0.5)
-        # print(content)
+            # print(content)
+
+    # check content control campaign
+    hashtags = re.findall(r'#\w+', content)
+    num_hashtags = len(hashtags)
+    num_words = len(content_list)
+    num_real_words = num_words - num_hashtags
+    if num_real_words > 0 and num_hashtags / num_real_words > 2:
+        if score < 5.0:
+            score = min(5.0, score + 0.5)
 
 
     for word in content_list:
