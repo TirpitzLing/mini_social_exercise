@@ -309,6 +309,7 @@ def user_profile(username):
     #  NEW: CHECK FOLLOW STATUS 
     is_currently_following = False # Default to False
     current_user_id = session.get('user_id')
+    user_rating = None
     
     # We only need to check if a user is logged in
     if current_user_id:
@@ -319,6 +320,14 @@ def user_profile(username):
         )
         if follow_relation:
             is_currently_following = True
+
+        rating_row = query_db(
+        'SELECT rating FROM ratings WHERE rater_id = ? AND rated_user_id = ?',
+        (current_user_id, user['id']),
+        one=True
+        )
+        if rating_row:
+            user_rating = rating_row['rating']
     # --
 
     return render_template('user_profile.html.j2', 
@@ -327,7 +336,8 @@ def user_profile(username):
                            comments=comments,
                            followers_count=followers_count, 
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           user_rating=user_rating)
     
 
 @app.route('/u/<username>/followers')
@@ -679,6 +689,31 @@ def unfollow_user(user_id):
     # Redirect back to the page the user came from
     return redirect(request.referrer or url_for('feed'))
 
+@app.route('/u/<int:user_id>/rate_user', methods=['POST'])
+def rate_user(user_id):
+    rating = int(request.form['rating'])
+    rater_id = session.get('user_id')
+    # Security: Ensure user is logged in
+    if not rater_id:
+        flash("You must be logged in to rate users.", "danger")
+        return redirect(url_for('login'))
+
+    # check if rated
+    existing_rating = query_db('SELECT id FROM ratings WHERE rater_id = ? AND rated_user_id = ?', (rater_id, user_id), one=True)
+    if existing_rating:
+        db = get_db()
+        query_db('UPDATE ratings SET rating = ? WHERE id = ?', (request.form['rating'], existing_rating['id']), commit=True)
+        db.commit()
+        flash('Your rating has been updated!', 'success')
+    else:
+        db = get_db()
+        query_db('INSERT INTO ratings (rater_id, rated_user_id, rating) VALUES (?, ?, ?)', (rater_id, user_id, request.form['rating']), commit=True)
+        db.commit()
+        flash('Your rating has been submitted!', 'success')
+    return redirect(request.referrer or url_for('feed'))
+
+
+
 @app.route('/admin')
 def admin_dashboard():
     """Displays the admin dashboard with users, posts, and comments, sorted by risk."""
@@ -715,10 +750,11 @@ def admin_dashboard():
     
     # First, get all users to calculate risk, then apply pagination in Python
     # It's more complex to do this efficiently in SQL if risk calc is Python-side
-    all_users_raw = query_db('SELECT id, username, profile, created_at FROM users')
+    all_users_raw = query_db('SELECT u.id AS id, u.username AS username, u.profile AS profile, u.created_at AS created_at, AVG(r.rating) as rating FROM users u LEFT JOIN ratings r ON u.id = r.rated_user_id GROUP BY u.id')
     all_users = []
     for user in all_users_raw:
         user_dict = dict(user)
+        user_dict['rating'] = round(user_dict['rating'], 2) if user_dict['rating'] is not None else 0.0
         user_risk_score = user_risk_analysis(user_dict['id'])
         risk_label, risk_sort_key = get_risk_profile(user_risk_score)
         user_dict['risk_label'] = risk_label
@@ -1067,9 +1103,21 @@ def user_risk_analysis(user_id):
         # user_risk_score = min(5.0, content_risk_score)
         user_risk_score = content_risk_score
 
+    rating_score = 0.0
+    ratings = query_db('SELECT AVG(rating) AS rating FROM ratings WHERE rated_user_id = ?', (user_id,))
+    if ratings[0]['rating'] != 0.0 and ratings[0]['rating'] is not None:
+        avg_rating = ratings[0]['rating']
+        if avg_rating < 3.0:
+            rating_score = (3.0 - avg_rating) * 1.0 
+        elif avg_rating > 3.0:
+            rating_score = (avg_rating - 3.0) * 0.5
+        else:
+            rating_score = 0.0
+
+    user_risk_score += rating_score
     # visual check for high risk users manually
-    if user_risk_score > 5.0:
-        print(f"User: {user_id}, user name: {user['username'] if user else 'Unknown'}, final risk score: {user_risk_score}")
+    # if user_risk_score > 5.0:
+    #     print(f"User: {user_id}, user name: {user['username'] if user else 'Unknown'}, final risk score: {user_risk_score}")
 
     return user_risk_score;
 
