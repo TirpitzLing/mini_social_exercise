@@ -42,7 +42,7 @@ def preprocess(text):
             # stopword removal
             stop_words = stopwords.words('english')
             # custom stop words
-            stop_words.extend(['get', 'like', 'would', 'also', 'one', 'know', 'think', 'time', 'see', 'could', 'make', 'even', 'really', 'going', 'want', 'need', 'way', 'new', 'good', 'much', 'still', 'take', 'lot', 'let', 'put', 'try', 'well', 'sure', 'thing', 'things', 'might', 'last', 'wow', 'hey', 'feel', 'new', 'keep', 'see'])
+            stop_words.extend(['get', 'like', 'would', 'also', 'one', 'know', 'think', 'time', 'see', 'could', 'make', 'even', 'really', 'going', 'want', 'need', 'way', 'new', 'good', 'much', 'still', 'take', 'lot', 'let', 'put', 'try', 'well', 'sure', 'thing', 'things', 'might', 'last', 'wow', 'hey', 'feel', 'new', 'keep', 'see', 'haha', 'bit', 'say', 'huh', 'maybe', 'often', 'ever', 'felt', 'went', 'lol'])
             processed = nltk.word_tokenize(text)
             processed = [word for word in processed if word not in stop_words]
             # lemmatization
@@ -89,7 +89,7 @@ def main():
     coherence_values = []
     k_values = []
 
-    for k in range(10, 50):
+    for k in range(10, 55):
         lda_model = gensim.models.LdaModel(corpus=corpus,
                                         id2word=dictionary,
                                         num_topics=k,
@@ -146,11 +146,13 @@ def main():
     for i, count in enumerate(topic_counts):
         print(f"Topic {i}: {count} posts")
     
-    # Display the top10 popular topics
+    # Display the top10 popular topics and representative words
     popular_topics = sorted(enumerate(topic_counts), key=lambda x: x[1], reverse=True)[:10]
     print("Top 10 popular topics:")
     for topic_id, count in popular_topics:
-        print(f"Topic {topic_id}: {count} posts")
+        words = optimal_lda.show_topic(topic_id, topn=5)
+        word_list = [word for word, prob in words]
+        print(f"Topic {topic_id} ({count} posts): {', '.join(word_list)}")
 
     # Visualization of Training
     plt.figure(figsize=(10, 5))
@@ -182,7 +184,7 @@ def main():
 
     # Sentiment Analysis
     sia = SentimentIntensityAnalyzer()
-    topic_df['sentiment'] = topic_df['content'].apply(lambda x: sia.polarity_scores(x)['compound'] if isinstance(x, str) else 0)
+    topic_df['sentiment'] = topic_df['processed'].apply(lambda x: sia.polarity_scores(x)['compound'] if isinstance(x, str) else 0)
     topic_df['label'] = topic_df['sentiment'].apply(lambda x: 'positive' if x > 0.05 else ('negative' if x < -0.05 else 'neutral'))
     # overrall tone
     overall_tone = topic_df['label'].value_counts(normalize=True) * 100
